@@ -66,3 +66,43 @@ resource "aws_s3_bucket_lifecycle_configuration" "raw_zone" {
     }
   }
 }
+
+resource "aws_iam_user" "ingestion" {
+  name = "nyc-taxi-ingestion-user"
+  tags = {
+    Project = var.project_name
+    Environment = var.environment
+    Purpose = "raw-data-ingestion"
+  }
+}
+
+resource "aws_iam_policy" "ingestion_s3_access" {
+  name        = "nyc-taxi-ingestion-s3-policy"
+  description = "Least-privilege access for ingestion script to write/read/list the raw landing zone bucket"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid     = "AllowPutAndListForIngestion"
+        Effect  = "Allow"
+        Action  = [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          aws_s3_bucket.raw_zone.arn,
+          "${aws_s3_bucket.raw_zone.arn}/*"
+        ]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_user_policy_attachment" "ingestion_attach" {
+  user        = aws_iam_user.ingestion.name
+  policy_arn  = aws_iam_policy.ingestion_s3_access.arn
+}
+
+
