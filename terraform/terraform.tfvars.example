@@ -1,0 +1,8 @@
+# terraform/terraform.tfvars.example
+# Copy this to terraform.tfvars and fill in your own values.
+# terraform.tfvars is gitignored — never commit real values.
+
+aws_region      = "us-west-2"
+project_name    = "nyc-taxi-analytics"
+environment     = "dev"
+raw_bucket_name = "your-globally-unique-bucket-name"
