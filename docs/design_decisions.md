@@ -275,10 +275,10 @@ Completed:
 - Idempotent Python ingestion script, backfilled 2024-01 through 2026-05.
 - Snowflake warehouse, database, and schema layering (`raw`, `staging`,
   `intermediate`, `marts`) via manual SQL (`snowflake/setup.sql`).
+- Dedicated Snowflake role.
 
 Not yet built:
-- Dedicated Snowflake role (currently operating as `ACCOUNTADMIN` — a known,
-  temporary gap, same category of issue as broad IAM permissions in Section 6).
+
 - Snowflake storage integration / external stage / `COPY INTO` from S3 into the
   `raw` schema.
 - dbt project (staging, intermediate, mart models; tests; docs).
