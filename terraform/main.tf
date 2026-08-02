@@ -65,6 +65,19 @@ resource "aws_s3_bucket_lifecycle_configuration" "raw_zone" {
       expired_object_delete_marker = true
     }
   }
+
+  rule {
+    id     = "expire-temp-uploads"
+    status = "Enabled"
+
+    filter {
+      prefix = "_tmp/"
+    }
+
+    expiration {
+      days = 1
+    }
+  }
 }
 
 resource "aws_iam_user" "ingestion" {

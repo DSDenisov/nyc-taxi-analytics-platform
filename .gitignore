@@ -18,6 +18,8 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+# my env
+.nyc-taxi-venv
 
 # dbt
 dbt/**/target/
@@ -38,5 +40,5 @@ airflow/**/__pycache__/
 .idea/
 
 #project info
-info.txt
+info.md
 secrets.txt
