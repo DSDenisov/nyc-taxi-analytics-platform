@@ -321,7 +321,7 @@ Completed:
 - Dedicated Snowflake role for DBT to use when doing transformations.
 - Snowflake storage integration / external stage / `COPY INTO` from S3 into the
   `raw` schema.
-- Dedicated Loader role creaetd (NYC_TAXI_LOADER_ROLE) to load date from stage into Raw schema 
+- Dedicated Loader role creaetd (NYC_TAXI_LOADER_ROLE) to load date from stage into Raw schema: 
 
 Not yet built:
 

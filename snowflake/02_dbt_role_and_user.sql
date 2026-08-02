@@ -1,14 +1,13 @@
 -- ============================================================
--- NYC Taxi Analytics Platform — Snowflake Role & Access Control
+-- NYC Taxi Analytics Platform — dbt Role & Service User
 -- ============================================================
--- Creates NYC_TAXI_DBT_ROLE, used by dbt (and later Airflow) to
--- run transformations. Deliberately scoped:
---   - SELECT-only on RAW (dbt sources from raw, never writes to it)
---   - full CREATE/DROP on STAGING, INTERMEDIATE, MARTS
---   - no CREATE WAREHOUSE / CREATE DATABASE / CREATE ROLE
+-- Creates NYC_TAXI_DBT_ROLE (scoped grants for dbt transformations)
+-- and NYC_TAXI_DBT_SVC_USER (the dedicated service identity dbt
+-- authenticates as — separate from personal/admin logins, same
+-- least-privilege separation used for the AWS ingestion user).
 --
 -- Run with:
---   snowsql -c <your_connection_profile> -f snowflake/02_roles.sql -o exit_on_error=true
+--   snowsql -c <your_connection_profile> -f snowflake/02_dbt_role_and_user.sql -o exit_on_error=true
 -- ============================================================
 
 CREATE ROLE IF NOT EXISTS NYC_TAXI_DBT_ROLE;
@@ -44,3 +43,14 @@ GRANT ALL ON FUTURE VIEWS IN SCHEMA NYC_TAXI_ANALYTICS.MARTS TO ROLE NYC_TAXI_DB
 
 -- Assign the role to yourself:
 GRANT ROLE NYC_TAXI_DBT_ROLE TO USER DSDENISOV;
+
+CREATE USER IF NOT EXISTS NYC_TAXI_DBT_SVC_USER
+  -- Replace with the actual RSA public key content (no BEGIN/END headers,
+  -- no line breaks). Generated locally, never committed — see
+  -- docs/design_decisions.md for the key-pair setup used for this project.
+  RSA_PUBLIC_KEY = '<your_public_key_here>'
+  DEFAULT_ROLE = NYC_TAXI_DBT_ROLE
+  DEFAULT_WAREHOUSE = NYC_TAXI_WH
+  DEFAULT_NAMESPACE = NYC_TAXI_ANALYTICS.STAGING
+  COMMENT = 'Service account for dbt runs. Automation only, no interactive login expected.';
+GRANT ROLE NYC_TAXI_DBT_ROLE TO USER NYC_TAXI_DBT_SVC_USER;
