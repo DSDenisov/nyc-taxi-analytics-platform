@@ -17,3 +17,8 @@ output "ingestion_policy_arn" {
   description = "ARN of the least-privilege s3 policy attached to the ingestion user"
   value = aws_iam_policy.ingestion_s3_access.arn
 }
+
+output "snowflake_storage_role_arn" {
+  description = "ARN of the IAM role Snowflake will assume for S3 read access via storage integration"
+  value       = aws_iam_role.snowflake_storage_integration.arn
+}

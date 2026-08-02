@@ -6,3 +6,6 @@ aws_region      = "us-west-2"
 project_name    = "nyc-taxi-analytics"
 environment     = "dev"
 raw_bucket_name = "your-globally-unique-bucket-name"
+
+snowflake_aws_iam_user_arn = ""
+snowflake_external_id = ""

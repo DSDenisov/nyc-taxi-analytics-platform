@@ -6,7 +6,7 @@
 -- model layers used in this project.
 --
 -- Run with:
---   snowsql -c <your_connection_profile> -f snowflake/setup.sql -o exit_on_error=true
+--   snowsql -c <your_connection_profile> -f snowflake/01_setup.sql -o exit_on_error=true
 --
 -- Manual/SQL setup (not Terraform) is a deliberate scope decision
 -- for this project — see docs/design_decisions.md.

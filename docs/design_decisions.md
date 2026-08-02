@@ -265,6 +265,49 @@ from the Terraform provisioner's `default` profile to avoid ever conflating the 
 identities locally. `boto3.Session(profile_name=...)` is used explicitly rather than
 relying on ambient/default credentials, so the script's identity is unambiguous.
 
+
+## Snowflake ↔ AWS Trust: Storage Integration Setup
+
+Connecting Snowflake to the S3 raw zone required a two-pass process, because of a
+genuine chicken-and-egg dependency: the AWS IAM role's trust policy needs Snowflake's
+AWS IAM user ARN and a generated external ID, but Snowflake only generates those
+*after* a storage integration is created referencing the role — which must already
+exist.
+
+**Pass 1:** Terraform creates the IAM role with a placeholder trust policy (trusting
+only our own AWS account). `CREATE STORAGE INTEGRATION` in Snowflake references this
+role's ARN and returns `STORAGE_AWS_IAM_USER_ARN` and `STORAGE_AWS_EXTERNAL_ID`.
+
+**Pass 2:** Those two values are fed back into Terraform (as variables, one marked
+`sensitive = true`) to replace the placeholder trust policy with the real one,
+including an `sts:ExternalId` condition.
+
+The external ID exists to solve the **confused deputy problem**: without it, a trust
+policy that only checks "is the caller Snowflake's AWS account" cannot distinguish
+between Snowflake acting on *our* behalf versus Snowflake acting on some other
+customer's behalf, since many Snowflake customers' storage integrations may share
+the same underlying Snowflake-side AWS principal. The external ID is a
+integration-specific shared secret; the trust policy requires both the correct
+principal AND the correct external ID.
+
+The `STORAGE_ALLOWED_LOCATIONS` parameter on the storage integration further scopes
+Snowflake's access to `s3://<bucket>/raw/` specifically, matching the IAM policy's
+own scope — defense in depth, not reliance on a single control layer.
+
+### Three distinct Snowflake roles, not one shared role
+
+- `NYC_TAXI_LOADER_ROLE` — writes to `RAW` only via `COPY INTO` from the external
+  stage. No access to `STAGING`/`INTERMEDIATE`/`MARTS`.
+- `NYC_TAXI_DBT_ROLE` — read-only on `RAW`; full ownership of `STAGING`,
+  `INTERMEDIATE`, `MARTS`. Cannot write to `RAW` under any circumstance — verified
+  with a negative test (`CREATE TABLE RAW.*` fails under this role).
+- Neither role can `CREATE WAREHOUSE`, `CREATE DATABASE`, or `CREATE ROLE` —
+  verified with a negative test.
+
+This mirrors the AWS IAM separation between the ingestion user and the (future)
+Snowflake storage role: each identity is scoped to exactly one stage of the
+pipeline, so a compromise of any single credential set has a contained blast radius
+rather than exposing the whole system.
 ---
 
 ## Current Status
@@ -275,12 +318,13 @@ Completed:
 - Idempotent Python ingestion script, backfilled 2024-01 through 2026-05.
 - Snowflake warehouse, database, and schema layering (`raw`, `staging`,
   `intermediate`, `marts`) via manual SQL (`snowflake/setup.sql`).
-- Dedicated Snowflake role.
+- Dedicated Snowflake role for DBT to use when doing transformations.
+- Snowflake storage integration / external stage / `COPY INTO` from S3 into the
+  `raw` schema.
+- Dedicated Loader role creaetd (NYC_TAXI_LOADER_ROLE) to load date from stage into Raw schema 
 
 Not yet built:
 
-- Snowflake storage integration / external stage / `COPY INTO` from S3 into the
-  `raw` schema.
 - dbt project (staging, intermediate, mart models; tests; docs).
 - Airflow DAG orchestrating the end-to-end pipeline.
 - Data dictionary for mart tables.

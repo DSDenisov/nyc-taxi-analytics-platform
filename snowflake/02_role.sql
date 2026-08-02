@@ -8,7 +8,7 @@
 --   - no CREATE WAREHOUSE / CREATE DATABASE / CREATE ROLE
 --
 -- Run with:
---   snowsql -c <your_connection_profile> -f snowflake/roles.sql -o exit_on_error=true
+--   snowsql -c <your_connection_profile> -f snowflake/02_roles.sql -o exit_on_error=true
 -- ============================================================
 
 CREATE ROLE IF NOT EXISTS NYC_TAXI_DBT_ROLE;
