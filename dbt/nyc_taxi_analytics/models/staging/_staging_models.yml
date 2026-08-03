@@ -1,0 +1,102 @@
+models:
+  - name: stg_yellow_tripdata
+    description: >
+      Staging model for NYC TLC Yellow Taxi trip records. Renames raw
+      source columns to consistent snake_case; no filtering, casting, or
+      business logic applied. One row per source record. Materialized as
+      a view — see dbt_project.yml.
+    columns:
+      - name: vendor_id
+        data_tests:
+          - not_null
+        description: >
+          A code indicating the TPEP provider that provided the record.
+          1 = Creative Mobile Technologies, LLC
+          2 = Curb Mobility, LLC
+          6 = Myle Technologies Inc
+          7 = Helix
+      - name: pickup_datetime
+        data_tests:
+          - not_null
+        description: The date and time when the meter was engaged.
+      - name: dropoff_datetime
+        data_tests:
+          - not_null
+        description: The date and time when the meter was disengaged.
+      - name: passenger_count
+        description: The number of passengers in the vehicle.
+      - name: trip_distance
+        data_tests:
+          - not_null
+        description: The elapsed trip distance in miles reported by the taximeter.
+      - name: rate_code_id
+        description: >
+          The final rate code in effect at the end of the trip.
+          1 = Standard rate
+          2 = JFK
+          3 = Newark
+          4 = Nassau or Westchester
+          5 = Negotiated fare
+          6 = Group ride
+          99 = Null/unknown
+      - name: store_and_fwd_flag
+        description: >
+          Whether the trip record was held in vehicle memory before sending
+          to the vendor ("store and forward"), because the vehicle did not
+          have a connection to the server.
+          Y = store and forward trip
+          N = not a store and forward trip
+      - name: pu_location_id
+        description: TLC Taxi Zone in which the taximeter was engaged.
+      - name: do_location_id
+        description: TLC Taxi Zone in which the taximeter was disengaged.
+      - name: payment_type
+        data_tests:
+          - not_null
+        description: >
+          A numeric code signifying how the passenger paid for the trip.
+          0 = Flex Fare trip
+          1 = Credit card
+          2 = Cash
+          3 = No charge
+          4 = Dispute
+          5 = Unknown
+          6 = Voided trip
+      - name: fare_amount
+        data_tests:
+          - not_null
+        description: The time-and-distance fare calculated by the meter.
+      - name: extra_charges
+        description: >
+          Miscellaneous extras and surcharges. Renamed from the source's
+          "extra" for clarity.
+      - name: mta_tax
+        description: Tax automatically triggered based on the metered rate in use.
+      - name: tip_amount
+        description: >
+          Tip amount. Automatically populated for credit card tips; cash
+          tips are not included.
+      - name: tolls_amount
+        description: Total amount of all tolls paid in the trip.
+      - name: improvement_surcharge
+        description: >
+          Improvement surcharge assessed on trips at the flag drop. In
+          effect since 2015.
+      - name: total_amount
+        data_tests:
+          - not_null
+        description: The total amount charged to passengers. Does not include cash tips.
+      - name: congestion_surcharge
+        description: Total amount collected in the trip for the NYS congestion surcharge.
+      - name: airport_fee
+        description: Applies to pickups only at LaGuardia and John F. Kennedy Airports.
+      - name: cbd_congestion_fee
+        description: >
+          Per-trip charge for MTA's Congestion Relief Zone, in effect since
+          Jan. 5, 2025. NULL for all trips before that date.
+      - name: ingested_at
+        description: Timestamp when the record was loaded into Snowflake (COPY INTO time).
+      - name: source_file
+        description: >
+          The S3 path of the source parquet file this record was loaded
+          from, captured via METADATA$FILENAME.
