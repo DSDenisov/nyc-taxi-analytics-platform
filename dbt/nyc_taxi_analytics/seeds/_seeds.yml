@@ -1,0 +1,12 @@
+# seeds/properties.yml (or wherever you document seeds)
+seeds:
+  - name: taxi_zone_lookup
+    description: TLC Taxi Zone definitions
+
+  - name: vendor_lookup
+    description: >
+        Vendor code to name mapping. Unlike taxi_zone_lookup, TLC does not
+        publish this as a downloadable file — values are transcribed from the
+        TLC Yellow Taxi data dictionary (vendor codes 1, 2, 6, 7 as documented).
+        Hand-authored and will need manual updates if TLC adds/changes vendor
+        codes in the future.

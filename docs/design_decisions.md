@@ -36,7 +36,8 @@ Snowflake STAGING schema
         │  dbt intermediate models (validity filtering / quarantine)
         ▼
 Snowflake INTERMEDIATE schema (int_trips_valid, int_trips_quarantined)
-        │  dbt mart models (business aggregates) — not yet built
+        │  dbt mart models (dim_taxi_zones, dim_vendors, fct_trips, and
+        │  business aggregates)
         ▼
 Snowflake MARTS schema
         │
@@ -376,6 +377,83 @@ AND cond2 AND cond3` instead of `NOT (cond1 AND cond2 AND cond3)` — a differen
 wrong expression that silently dropped the 55 implausibly-old rows from both
 models. Fixed by explicitly parenthesizing the macro call.
 
+## 8c. Marts Layer
+
+### Seeds vs. pipeline data
+
+Two small reference datasets are loaded as dbt seeds, both landing in `STAGING`
+(schema-wise) since — like `raw` — they're unprocessed inputs to a marts-layer
+transformation, not finished analyst-facing objects themselves:
+
+- **`taxi_zone_lookup`** — downloaded from TLC's own CloudFront source
+  (`.../misc/taxi_zone_lookup.csv`), the same domain the ingestion script uses.
+  265 rows, static.
+- **`vendor_lookup`** — hand-authored, not downloaded. TLC does not publish vendor
+  code-to-name mapping as a file; the four values (1, 2, 6, 7) are transcribed from
+  the data dictionary. Will need manual updates if TLC adds/changes vendor codes.
+
+Seeds do not support the `+transient` config in dbt (confirmed against dbt's
+seed-configs reference — only `quote_columns`, `column_types`, and `delimiter` are
+seed-specific configs); both seed tables remain permanent. Accepted as-is given
+negligible size (hundreds of rows).
+
+### Dimension models: `dim_taxi_zones`, `dim_vendors`
+
+Both seeds are wrapped in a thin marts-layer dimension model before anything joins
+to them, even though neither needs real transformation — this is a deliberate
+consistency choice: every marts-facing object goes through a `dim_`/`fct_`-prefixed
+model, never a direct reference to a raw seed, so the convention doesn't silently
+differ by dimension.
+
+### `fct_trips`: the shared fact table
+
+Built once, on top of `int_trips_valid`, joined to `dim_taxi_zones` twice (pickup
+and dropoff location, via two CTEs referencing the same `ref()` — functionally
+identical to one CTE joined twice; a small, static dimension table makes any
+difference here negligible either way). Both `pu_location_id`/`do_location_id`
+codes 264 (N/A) and 265 (Unknown) exist as real rows in the zone lookup, so an
+inner join is safe and doesn't silently drop trips with placeholder zones.
+
+Materialized as `table` (not `view`): `fct_trips` has multiple downstream
+consumers (both marts below), so materializing it once avoids re-running the
+full staging → intermediate → join chain on every mart query. Also marked
+`+transient: true` at the model level — unlike seeds, this config **is**
+supported for models and was verified to take effect (`SHOW TABLES` reports
+`TRANSIENT`). Row count (108,887,734) exactly matches `int_trips_valid`,
+confirming no rows were lost in either zone join.
+
+### `mart_revenue_by_borough_hour`
+
+Grain: one row per (pickup borough, pickup hour-of-day). Columns limited exactly
+to what the business requirement (Section 1) asked for — `trip_count`,
+`total_revenue` — deliberately excluding derived stats (averages) that weren't
+requested, to avoid unrequested scope creep in a business-facing table.
+
+### `mart_vendor_performance`
+
+Grain: one row per vendor. `avg_trip_minutes` via `DATEDIFF(minute, ...)`;
+`avg_tip_percentage` as `tip_amount / NULLIF(fare_amount, 0) * 100` — dividing by
+fare (not `total_amount`), matching the standard convention that tips are a
+percentage of the service fare, not of accumulated tolls/taxes/surcharges.
+`NULLIF` guards against a division-by-zero on any zero-fare trip.
+
+**Finding, not a bug:** two vendors show structurally unusable values for one
+metric each, discovered by checking whether "0" values were a genuine average or
+100% uniform:
+- **Vendor 7 (Helix):** 770,887 of 770,887 trips have `pickup_datetime ==
+  dropoff_datetime` — likely a single-timestamp transaction log rather than
+  separately-timed meter events. Fares and tips are normal; `avg_trip_minutes`
+  is not meaningful for this vendor.
+- **Vendor 6 (Myle):** 61,449 of 61,449 trips have `tip_amount = 0`, alongside an
+  average fare (~$3.53) far below the other vendors (~$16-19) — suggesting a
+  different fare/tip data model rather than actual rider behavior.
+  `avg_tip_percentage` is not meaningful for this vendor.
+
+Both vendors are newer additions to TLC's vendor code list per the data
+dictionary. Documented directly in `_marts_models.yml` rather than silently
+"fixed" — the underlying fare/trip data is legitimate business activity; only
+specific derived metrics are unreliable for these two vendors.
+
 ## 9. Current Status
 
 Completed:
@@ -393,11 +471,14 @@ Completed:
   after fixing the epoch-unit bug (Section 7d).
 - dbt project scaffolded; `stg_yellow_tripdata` (staging) and `int_trips_valid`
   / `int_trips_quarantined` (intermediate) built and tested (Sections 8, 8b).
+- Marts layer: `dim_taxi_zones`, `dim_vendors`, `fct_trips`,
+  `mart_revenue_by_borough_hour`, `mart_vendor_performance` — all three original
+  business questions from Section 1 now answered (Section 8c).
 
 Not yet built:
-- dbt mart models answering the three business questions from Section 1.
 - Airflow DAG orchestrating ingestion → load → dbt build on a schedule.
-- Data dictionary for mart tables.
+- Data dictionary for mart tables (partially covered by `_marts_models.yml`
+  descriptions; a standalone dictionary doc not yet written).
 - Unit tests for the ingestion script.
 
 ---

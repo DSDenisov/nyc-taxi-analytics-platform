@@ -32,9 +32,28 @@ clean-targets:         # directories to be removed by `dbt clean`
 
 models:
   nyc_taxi_analytics:
+    +transient: true
     staging:
       +schema: staging
       +materialized: view
     intermediate:
       +schema: intermediate
       +materialized: view
+    marts:
+      +schema: marts
+      +materialized: table
+
+seeds:
+  nyc_taxi_analytics:
+    +schema: staging
+    taxi_zone_lookup:
+      +column_types:
+        LocationID: NUMBER
+        Borough: VARCHAR
+        Zone: VARCHAR
+        service_zone: VARCHAR
+    vendor_lookup:
+      +column_types:
+        vendor_id: NUMBER
+        vendor_name: VARCHAR
+    
