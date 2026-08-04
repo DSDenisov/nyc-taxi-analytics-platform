@@ -1,5 +1,12 @@
 with src as (
     select * from {{ source('raw', 'yellow_tripdata') }}
+),
+parsed as (
+    select
+        *,
+        REGEXP_SUBSTR(_SOURCE_FILE, 'yellow_tripdata_(\\d{4})-(\\d{2})', 1, 1, 'e', 1)::int as file_year,
+        REGEXP_SUBSTR(_SOURCE_FILE, 'yellow_tripdata_(\\d{4})-(\\d{2})', 1, 1, 'e', 2)::int as file_month
+    from src
 )
 select       VENDORID               as vendor_id
             ,TPEP_PICKUP_DATETIME   as pickup_datetime
@@ -23,4 +30,7 @@ select       VENDORID               as vendor_id
             ,CBD_CONGESTION_FEE     as cbd_congestion_fee
             ,_INGESTED_AT           as ingested_at
             ,_SOURCE_FILE           as source_file
-from src
+            ,DATE_FROM_PARTS(file_year, file_month, 1)                      as file_start_date
+            ,DATEADD(month, 1, DATE_FROM_PARTS(file_year, file_month, 1))   as file_end_date
+
+from parsed

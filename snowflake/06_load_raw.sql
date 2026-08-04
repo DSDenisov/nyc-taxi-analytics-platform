@@ -2,31 +2,6 @@ USE ROLE NYC_TAXI_LOADER_ROLE;
 USE WAREHOUSE NYC_TAXI_WH;
 USE DATABASE NYC_TAXI_ANALYTICS;
 
-CREATE TABLE IF NOT EXISTS RAW.YELLOW_TRIPDATA (
-    VendorID                NUMBER,
-    tpep_pickup_datetime     TIMESTAMP_NTZ,
-    tpep_dropoff_datetime    TIMESTAMP_NTZ,
-    passenger_count           FLOAT,
-    trip_distance             FLOAT,
-    RatecodeID                FLOAT,
-    store_and_fwd_flag        STRING,
-    PULocationID              NUMBER,
-    DOLocationID              NUMBER,
-    payment_type              FLOAT,
-    fare_amount                FLOAT,
-    extra                      FLOAT,
-    mta_tax                    FLOAT,
-    tip_amount                 FLOAT,
-    tolls_amount                FLOAT,
-    improvement_surcharge      FLOAT,
-    total_amount                FLOAT,
-    congestion_surcharge        FLOAT,
-    Airport_fee                  FLOAT,
-    cbd_congestion_fee           FLOAT,
-    _ingested_at                  TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-    _source_file                   STRING
-);
-
 COPY INTO RAW.YELLOW_TRIPDATA (
     VendorID, tpep_pickup_datetime, tpep_dropoff_datetime, passenger_count,
     trip_distance, RatecodeID, store_and_fwd_flag, PULocationID, DOLocationID,
@@ -37,8 +12,8 @@ COPY INTO RAW.YELLOW_TRIPDATA (
 FROM (
     SELECT
         $1:VendorID,
-        $1:tpep_pickup_datetime,
-        $1:tpep_dropoff_datetime,
+        TO_TIMESTAMP_NTZ($1:tpep_pickup_datetime::NUMBER, 6),
+        TO_TIMESTAMP_NTZ($1:tpep_dropoff_datetime::NUMBER, 6),
         $1:passenger_count,
         $1:trip_distance,
         $1:RatecodeID,

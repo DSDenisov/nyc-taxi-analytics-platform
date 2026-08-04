@@ -27,16 +27,16 @@ NYC TLC public source (CloudFront)
         │  Python ingestion script (idempotent, streamed)
         ▼
 S3 Raw Landing Zone (our own bucket, versioned, encrypted, private)
-        │  Snowflake external stage + COPY INTO (not yet built)
+        │  Snowflake external stage + COPY INTO (NYC_TAXI_LOADER_ROLE)
         ▼
-Snowflake RAW schema
-        │  dbt staging models
+Snowflake RAW schema (RAW.YELLOW_TRIPDATA)
+        │  dbt staging model (stg_yellow_tripdata) — NYC_TAXI_DBT_ROLE
         ▼
 Snowflake STAGING schema
-        │  dbt intermediate models (dedupe, anomaly filtering)
+        │  dbt intermediate models (validity filtering / quarantine)
         ▼
-Snowflake INTERMEDIATE schema
-        │  dbt mart models (business aggregates)
+Snowflake INTERMEDIATE schema (int_trips_valid, int_trips_quarantined)
+        │  dbt mart models (business aggregates) — not yet built
         ▼
 Snowflake MARTS schema
         │
@@ -44,8 +44,9 @@ Snowflake MARTS schema
 Analyst / BI query layer
 ```
 
-Orchestration (Airflow) and the dbt project itself have not been built yet as of this
-document's current state — see Section 9, "Current Status."
+Orchestration (Airflow) has not been built yet — it will trigger the ingestion
+script, the `COPY INTO` load, and `dbt build` on a schedule. All of these steps are
+currently run manually. See Section 9, "Current Status," for what's built.
 
 ---
 
@@ -79,7 +80,8 @@ Guardrails implemented:
   rows); oversizing would be pure waste.
 - S3 bucket region (`us-west-2`) chosen to match the Snowflake account's region,
   minimizing cross-region data transfer cost on `COPY INTO`, since that's the
-  higher-frequency recurring cost.
+  higher-frequency recurring cost compared to the one-time cross-region pull from
+  the NYC TLC source (hosted in `us-east-1`).
 - S3 lifecycle rules expire noncurrent object versions after 30 days and `_tmp/`
   scratch uploads after 1 day, preventing unbounded storage growth.
 
@@ -131,7 +133,7 @@ pragmatic, still-least-privilege answer for local execution. When ingestion move
 AWS-managed compute (Lambda/ECS) in a future iteration, that's the point to switch
 to a role with no stored secret at all.
 
-### Why Snowflake's future S3 access will use a separate role, not this user
+### Why Snowflake's S3 access uses a separate role, not this user
 
 Two reasons:
 1. **Blast radius isolation.** The ingestion user's static credentials are a
@@ -147,8 +149,9 @@ Two reasons:
    assuming the same role) and violates the "one role, one well-defined caller"
    pattern.
 
-Snowflake's eventual role will be scoped to `GetObject`/`ListBucket` only — it never
-writes to the raw bucket, only reads via `COPY INTO`.
+Snowflake's role (`nyc-taxi-snowflake-storage-role`) is scoped to `GetObject`/
+`ListBucket` only — it never writes to the raw bucket, only reads via `COPY INTO`.
+See Section 7b for the trust policy setup.
 
 ### Access keys not managed by Terraform
 
@@ -202,6 +205,84 @@ this bucket. The tradeoff is a maximum ~1 day of harmless leftover scratch stora
 which is judged worth it for the permission reduction.
 
 ---
+
+## 7b. Snowflake ↔ AWS Trust: Storage Integration
+
+Connecting Snowflake to the S3 raw zone required a two-pass process, because the AWS
+IAM role's trust policy needs Snowflake's AWS IAM user ARN and a generated external
+ID, but Snowflake only generates those *after* a storage integration is created
+referencing the role — which must already exist.
+
+**Pass 1:** Terraform creates the IAM role (`nyc-taxi-snowflake-storage-role`) with a
+placeholder trust policy (trusting only our own AWS account). `CREATE STORAGE
+INTEGRATION` in Snowflake references this role's ARN and returns
+`STORAGE_AWS_IAM_USER_ARN` and `STORAGE_AWS_EXTERNAL_ID`.
+
+**Pass 2:** Those two values are fed back into Terraform (as variables, the external
+ID marked `sensitive = true`) to replace the placeholder trust policy with the real
+one, including an `sts:ExternalId` condition.
+
+The external ID exists to solve the **confused deputy problem**: a trust policy that
+only checks "is the caller Snowflake's AWS account" cannot distinguish Snowflake
+acting on *our* behalf from Snowflake acting on another customer's behalf, since many
+customers' integrations may share the same underlying Snowflake-side AWS principal.
+The external ID is integration-specific; the trust policy requires both the correct
+principal AND the correct external ID.
+
+`STORAGE_ALLOWED_LOCATIONS` further scopes the integration to `s3://<bucket>/raw/`,
+matching the IAM policy's own scope — defense in depth, not reliance on one layer.
+
+Verified end-to-end with `LIST @stage` — confirmed the full cross-account trust
+chain actually functions, not just that objects were created without error.
+
+## 7c. Three Snowflake Roles, Not One Shared Role
+
+- **`NYC_TAXI_LOADER_ROLE`** — writes to `RAW` only, via `COPY INTO` from the
+  external stage. No access to `STAGING`/`INTERMEDIATE`/`MARTS`.
+- **`NYC_TAXI_DBT_ROLE`** — read-only (`SELECT`) on `RAW`; full `CREATE`/`DROP`
+  ownership of `STAGING`, `INTERMEDIATE`, `MARTS`. Cannot write to `RAW` under any
+  circumstance — verified with a negative test (`CREATE TABLE RAW.*` fails under
+  this role). Held by a dedicated service user, `NYC_TAXI_DBT_SVC_USER`
+  (key-pair authenticated, no `ACCOUNTADMIN` grant, ever).
+- Neither role can `CREATE WAREHOUSE`, `CREATE DATABASE`, or `CREATE ROLE` —
+  verified with a negative test.
+
+This mirrors the AWS IAM separation between the ingestion user and the Snowflake
+storage role: each identity is scoped to exactly one stage of the pipeline, so a
+compromise of any single credential set has a contained blast radius. Loading data
+into `raw` and transforming data already in `raw` are treated as genuinely separate
+concerns with separate identities — dbt is never used as a general-purpose loader.
+
+## 7d. Loading RAW.YELLOW_TRIPDATA (COPY INTO)
+
+Schema-on-write, not `VARIANT`: the TLC schema is documented and stable enough to
+type explicitly, avoiding `VARIANT` unpacking overhead in every downstream query.
+One table for all months (not one table per month) — dbt's staging layer needs a
+single consistent source; per-month tables would force a `UNION ALL` that has to be
+manually maintained every time a new month arrives, the same drift risk already
+solved once via `_partition_prefix` in the ingestion script.
+
+TLC's own documentation confirms the parquet schema isn't fully standardized across
+years (e.g., `passenger_count`/`RatecodeID`/`payment_type` stored as `DOUBLE` in some
+files, `INT64` in others; `cbd_congestion_fee` only exists from 2025 onward). Columns
+with observed type drift are typed `FLOAT` rather than strict `NUMBER`, trading a
+small amount of precision-purity for load robustness against a source we don't
+control. `METADATA$FILENAME` is captured into `_source_file` for traceability.
+
+**Bug found and fixed:** the first load reported `LOADED`, zero errors, on all 29
+files — but `tpep_pickup_datetime`/`tpep_dropoff_datetime` were still wrong, landing
+in the year 54,500,075. `COPY INTO`'s implicit `VARIANT → TIMESTAMP_NTZ` cast
+assumed the underlying integer was epoch **seconds**; the source actually stores
+epoch **microseconds**. Fixed with an explicit `TO_TIMESTAMP_NTZ(value::NUMBER, 6)`
+(scale 6 = microseconds). Required a full `TRUNCATE` + reload, since Snowflake's
+`COPY INTO` load history would otherwise skip already-"successfully" loaded files on
+rerun. The S3 raw zone was unaffected, so no re-ingestion was needed — the payoff of
+keeping ingestion and loading decoupled (Section 3).
+
+This is a sharper version of the ingestion script's typo bug (Section 8): a
+**successful load status does not mean correct data** — the failure here was
+semantic (wrong unit interpretation), not syntactic, so nothing about the load
+itself signaled a problem.
 
 ## 8. Ingestion Script Design
 
@@ -265,73 +346,63 @@ from the Terraform provisioner's `default` profile to avoid ever conflating the 
 identities locally. `boto3.Session(profile_name=...)` is used explicitly rather than
 relying on ambient/default credentials, so the script's identity is unambiguous.
 
-
-## Snowflake ↔ AWS Trust: Storage Integration Setup
-
-Connecting Snowflake to the S3 raw zone required a two-pass process, because of a
-genuine chicken-and-egg dependency: the AWS IAM role's trust policy needs Snowflake's
-AWS IAM user ARN and a generated external ID, but Snowflake only generates those
-*after* a storage integration is created referencing the role — which must already
-exist.
-
-**Pass 1:** Terraform creates the IAM role with a placeholder trust policy (trusting
-only our own AWS account). `CREATE STORAGE INTEGRATION` in Snowflake references this
-role's ARN and returns `STORAGE_AWS_IAM_USER_ARN` and `STORAGE_AWS_EXTERNAL_ID`.
-
-**Pass 2:** Those two values are fed back into Terraform (as variables, one marked
-`sensitive = true`) to replace the placeholder trust policy with the real one,
-including an `sts:ExternalId` condition.
-
-The external ID exists to solve the **confused deputy problem**: without it, a trust
-policy that only checks "is the caller Snowflake's AWS account" cannot distinguish
-between Snowflake acting on *our* behalf versus Snowflake acting on some other
-customer's behalf, since many Snowflake customers' storage integrations may share
-the same underlying Snowflake-side AWS principal. The external ID is a
-integration-specific shared secret; the trust policy requires both the correct
-principal AND the correct external ID.
-
-The `STORAGE_ALLOWED_LOCATIONS` parameter on the storage integration further scopes
-Snowflake's access to `s3://<bucket>/raw/` specifically, matching the IAM policy's
-own scope — defense in depth, not reliance on a single control layer.
-
-### Three distinct Snowflake roles, not one shared role
-
-- `NYC_TAXI_LOADER_ROLE` — writes to `RAW` only via `COPY INTO` from the external
-  stage. No access to `STAGING`/`INTERMEDIATE`/`MARTS`.
-- `NYC_TAXI_DBT_ROLE` — read-only on `RAW`; full ownership of `STAGING`,
-  `INTERMEDIATE`, `MARTS`. Cannot write to `RAW` under any circumstance — verified
-  with a negative test (`CREATE TABLE RAW.*` fails under this role).
-- Neither role can `CREATE WAREHOUSE`, `CREATE DATABASE`, or `CREATE ROLE` —
-  verified with a negative test.
-
-This mirrors the AWS IAM separation between the ingestion user and the (future)
-Snowflake storage role: each identity is scoped to exactly one stage of the
-pipeline, so a compromise of any single credential set has a contained blast radius
-rather than exposing the whole system.
 ---
 
-## Current Status
+## 8b. Intermediate Layer: Trip Validity Rule
+
+Initial hypothesis: a trip is anomalous if its pickup month doesn't match its
+source file's declared month (derived from `_source_file` via regex, exposed as
+`file_start_date`/`file_end_date` in staging). This caught the known 58 rows with
+implausible years (2001-2009), but investigation of the resulting quarantine set
+showed ~180 false positives — real, valid trips filed a day or two into an
+adjacent month's export, a known TLC export-batching behavior, not bad data.
+
+Replaced with a direct plausibility rule (`macros/is_valid_trip.sql`): dropoff
+must not precede pickup, and pickup must fall within a broad, dynamic date range
+(2020-01-01 through one month past `CURRENT_DATE()`, avoiding hardcoded upper
+bounds). The rule is defined once in a macro and referenced by both
+`int_trips_valid` (`where {{ is_valid_trip() }}`) and `int_trips_quarantined`
+(`where not ({{ is_valid_trip() }})`), so the split can't silently diverge.
+
+Result: 3,870 of 108,891,604 rows quarantined (0.0036%) — 3,815 dropoff-before-
+pickup (the dominant, previously-undetected category) and 55 implausibly old
+pickups. Verified with a reconciliation test (`assert_trips_fully_partitioned`)
+asserting `valid + quarantined == staging` row counts.
+
+That test caught a real bug during development: the negation in
+`int_trips_quarantined` was written as `where not {{ is_valid_trip() }}` without
+parentheses. Since `NOT` binds tighter than `AND`, this compiled to `(NOT cond1)
+AND cond2 AND cond3` instead of `NOT (cond1 AND cond2 AND cond3)` — a different,
+wrong expression that silently dropped the 55 implausibly-old rows from both
+models. Fixed by explicitly parenthesizing the macro call.
+
+## 9. Current Status
 
 Completed:
 - S3 raw landing zone (Terraform), hardened per Section 7.
 - Least-privilege IAM user for ingestion (Terraform).
-- Idempotent Python ingestion script, backfilled 2024-01 through 2026-05.
+- Idempotent Python ingestion script, backfilled 2024-01 through 2026-05
+  (~108.9M rows).
 - Snowflake warehouse, database, and schema layering (`raw`, `staging`,
-  `intermediate`, `marts`) via manual SQL (`snowflake/setup.sql`).
-- Dedicated Snowflake role for DBT to use when doing transformations.
-- Snowflake storage integration / external stage / `COPY INTO` from S3 into the
-  `raw` schema.
-- Dedicated Loader role creaetd (NYC_TAXI_LOADER_ROLE) to load date from stage into Raw schema: 
+  `intermediate`, `marts`) via manual SQL (`snowflake/`).
+- Snowflake ↔ AWS storage integration and external stage, verified end-to-end
+  (Section 7b).
+- Three least-privilege Snowflake roles (loader, dbt, both verified with
+  negative tests) — no work runs as `ACCOUNTADMIN` (Section 7c).
+- `RAW.YELLOW_TRIPDATA` loaded via `COPY INTO`, all 29 files, verified correct
+  after fixing the epoch-unit bug (Section 7d).
+- dbt project scaffolded; `stg_yellow_tripdata` (staging) and `int_trips_valid`
+  / `int_trips_quarantined` (intermediate) built and tested (Sections 8, 8b).
 
 Not yet built:
-
-- dbt project (staging, intermediate, mart models; tests; docs).
-- Airflow DAG orchestrating the end-to-end pipeline.
+- dbt mart models answering the three business questions from Section 1.
+- Airflow DAG orchestrating ingestion → load → dbt build on a schedule.
 - Data dictionary for mart tables.
+- Unit tests for the ingestion script.
 
 ---
 
-## Known Simplifications (Not Production-Ready As-Is)
+## 10. Known Simplifications (Not Production-Ready As-Is)
 
 Recorded explicitly so they're never mistaken for oversights:
 
@@ -340,8 +411,18 @@ Recorded explicitly so they're never mistaken for oversights:
 2. Terraform state is local, not remote (S3 + DynamoDB lock table).
 3. Snowflake infrastructure is hand-run SQL, not Terraform.
 4. AWS and Snowflake credentials are static, locally-stored secrets (IAM user
-   access keys; Snowflake key-pair private key on disk), not the fully
-   production-grade answer (STS-issued temporary credentials, secrets manager
-   integration, CI/CD-based OIDC federation).
-5. No automated tests yet exist for the ingestion script (planned: unit tests using
-   `moto` to mock S3 and validate idempotency/upload logic without real AWS calls).
+   access keys; Snowflake key-pair private keys on disk — the dbt service
+   user's key is unencrypted, a deliberate tradeoff for non-interactive
+   automation use), not the fully production-grade answer (STS-issued
+   temporary credentials, secrets manager integration, CI/CD-based OIDC
+   federation).
+5. No automated tests yet exist for the ingestion script (planned: unit tests
+   using `moto` to mock S3 and validate idempotency/upload logic without real
+   AWS calls).
+6. Local dev environment briefly and accidentally used the dbt Fusion engine
+   (a preview-tagged tool) instead of dbt-core, due to a `PATH` collision with
+   a prior install; removed in favor of the pinned, stable dbt-core +
+   dbt-snowflake combination this project is built on.
+7. `dbt-core` was initially left unpinned in `requirements.txt` (only
+   `dbt-snowflake` was pinned), which let pip resolve a newer `dbt-core` than
+   the tested adapter version — both are now pinned to the same range.

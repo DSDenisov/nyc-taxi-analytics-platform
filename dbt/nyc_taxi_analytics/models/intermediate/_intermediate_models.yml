@@ -1,0 +1,20 @@
+models:
+  - name: int_trips_valid
+    description: >
+      Trip records passing the check defined in the
+      is_valid_trip() macro: dropoff after pickup, pickup date within a
+      sane calendar range. Feeds all downstream marts.
+    columns:
+      - name: pickup_datetime
+        data_tests:
+          - not_null
+      - name: dropoff_datetime
+        data_tests:
+          - not_null
+
+  - name: int_trips_quarantined
+    description: >
+      Trip records failing the check — dropoff before
+      pickup (the dominant category) or invalid pickup
+      dates outside 2020-present. Preserved for audit/
+      monitoring rather than silently discarded.
