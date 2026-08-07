@@ -57,4 +57,4 @@ Each component's `requirements.txt`/`.env.example` documents its own dependencie
 
 ## Status
 
-Core pipeline complete and functioning end-to-end. Known simplifications (local Terraform state, manual Snowflake SQL setup, local Airflow via Docker Compose) are documented explicitly in `docs/design_decisions.md`, not hidden.
+Core pipeline complete and functioning end-to-end. Known simplifications (local Terraform state, manual Snowflake SQL setup, local Airflow via Docker Compose) are documented explicitly in `docs/design_decisions.md`.
