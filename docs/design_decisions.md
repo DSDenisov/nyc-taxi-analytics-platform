@@ -27,10 +27,10 @@ NYC TLC public source (CloudFront)
         │  Python ingestion script (idempotent, streamed)
         ▼
 S3 Raw Landing Zone (our own bucket, versioned, encrypted, private)
-        │  Snowflake external stage + COPY INTO (NYC_TAXI_LOADER_ROLE)
+        │  Snowflake external stage + COPY INTO (NYC_TAXI_LOADER_SVC_USER)
         ▼
 Snowflake RAW schema (RAW.YELLOW_TRIPDATA)
-        │  dbt staging model (stg_yellow_tripdata) — NYC_TAXI_DBT_ROLE
+        │  dbt staging model (stg_yellow_tripdata) — NYC_TAXI_DBT_SVC_USER
         ▼
 Snowflake STAGING schema
         │  dbt intermediate models (validity filtering / quarantine)
@@ -43,11 +43,11 @@ Snowflake MARTS schema
         │
         ▼
 Analyst / BI query layer
-```
 
-Orchestration (Airflow) has not been built yet — it will trigger the ingestion
-script, the `COPY INTO` load, and `dbt build` on a schedule. All of these steps are
-currently run manually. See Section 9, "Current Status," for what's built.
+Orchestration: Airflow (local, Docker, LocalExecutor)
+  wait_for_source_file (sensor) → ingest_month → copy_into_raw → dbt_build
+  monthly schedule, 3-month lag, skip-propagating when there's nothing new
+```
 
 ---
 
@@ -453,6 +453,128 @@ Both vendors are newer additions to TLC's vendor code list per the data
 dictionary. Documented directly in `_marts_models.yml` rather than silently
 "fixed" — the underlying fare/trip data is legitimate business activity; only
 specific derived metrics are unreliable for these two vendors.
+
+## 8d. Airflow Orchestration
+
+### Local Docker Compose, LocalExecutor (not CeleryExecutor)
+
+The official Airflow docker-compose.yaml defaults to CeleryExecutor, which brings up
+7 services (scheduler, dag-processor, api-server, worker, triggerer, Redis, Postgres)
+designed for distributed, multi-worker task execution. This project's DAG is three
+to four sequential tasks, run monthly, on one machine — there is no parallel or
+multi-node workload to justify Celery's added complexity. Simplified to
+LocalExecutor (tasks run as local processes on the same machine as the scheduler),
+removing Redis, the worker service, and Flower entirely. Same "right-size
+infrastructure to the actual workload" reasoning as the Snowflake warehouse sizing
+decision in Section 4.
+
+Hand-editing the official compose file introduced two real bugs, both caught before
+the stack would even start: `LocalExecuter` (typo, missing the "o") and `{# ... #}`
+Jinja-comment syntax used in place of valid YAML `#` comments to remove the
+Redis/worker/Flower blocks — neither is meaningful to a YAML parser. Also required
+removing the now-orphaned `redis: condition: service_healthy` dependency from the
+shared `airflow-common-depends-on` anchor, which every service inherited.
+
+### Reaching project code and credentials from inside containers
+
+Airflow runs in isolated containers with none of the host's dependencies,
+credentials, or project code by default. Solved in two parts:
+
+- **Code and dependencies**: a custom Dockerfile extends `apache/airflow:3.3.0`,
+  installing the same pinned dependencies as the host venv (`boto3`, `requests`,
+  `dbt-core`, `dbt-snowflake`, `snowflake-connector-python`) from each component's
+  own `requirements.txt`. The Docker build context is set to the project root (not
+  `airflow/`, where the compose file lives) via `context: ..` in `docker-compose.yaml`,
+  since the Dockerfile needs to `COPY` files from `ingestion/`, `dbt/`, and
+  `snowflake/` — none of which are visible from a build context scoped to `airflow/`
+  alone. A `.dockerignore` at the project root keeps `.git/`, `.venv/`, and state
+  files out of the build context.
+- **Project code**: `ingestion/`, `dbt/nyc_taxi_analytics/`, and `snowflake/` are
+  volume-mounted read-write into the containers, so DAG edits and script changes
+  are reflected immediately with no rebuild — only dependency changes require
+  `docker compose build`.
+- **Credentials**: AWS credentials, dbt's `profiles.yml`, and both service users'
+  private keys are mounted read-only, reusing the exact same files already proven
+  to work on the host — no credentials are baked into the image, and none are
+  duplicated or re-entered. Host filesystem paths (which reveal information about
+  local machine layout, unlike the values themselves) are never written as literal
+  strings in the committed `docker-compose.yaml` — every path is referenced via a
+  variable sourced from `airflow/.env` (git-ignored; `.env.example` committed with
+  placeholders), the same pattern already used for `terraform.tfvars`.
+
+### `profiles.yml` works identically on the host and inside containers
+
+`private_key_path` in `~/.dbt/profiles.yml` resolves via
+`{{ env_var('DBT_PRIVATE_KEY_PATH') }}` rather than a hardcoded path. Locally, this
+variable is exported via `.zshrc`; inside containers, it's set directly in
+`docker-compose.yaml`'s `environment` block. One file, no branching, correct in
+both contexts — same principle as `ingestion/config.py`'s
+`os.environ.get(key, default)` pattern.
+
+### `COPY INTO` via the Python connector, not SnowSQL
+
+Initially planned to install SnowSQL as a system dependency in the Docker image to
+run the `COPY INTO` load script. Reconsidered: `snowflake-connector-python` is just
+another pinned pip dependency (same category as `boto3`), reuses the exact
+key-pair authentication already proven for dbt inside the container, and keeps
+every task in the DAG following the same "run a Python script" shape rather than
+introducing a third distinct invocation pattern. `snowflake/run_sql_script.py`
+splits a `.sql` file on `;` and executes each statement — verified safe for
+`operations/load_raw.sql` specifically (no semicolons inside string literals or
+comments), documented as a real limitation if ever pointed at a more complex file.
+
+`snowflake/` was reorganized into `setup/` (one-time infrastructure: warehouse,
+roles, storage integration — run once by a human) and `operations/` (recurring:
+`load_raw.sql`, run monthly by Airflow) — the distinction is now structurally
+visible, not something you'd have to read file contents to discover.
+
+### A third least-privilege identity: `NYC_TAXI_LOADER_SVC_USER`
+
+`NYC_TAXI_LOADER_ROLE` (Section 7c) existed but had never been granted to a
+dedicated service user — every `COPY INTO` so far had been run manually under a
+personal admin-tier login. Created `NYC_TAXI_LOADER_SVC_USER`, own key pair,
+holding only `NYC_TAXI_LOADER_ROLE` — same containment pattern as
+`NYC_TAXI_DBT_SVC_USER`: a leaked key can only ever do what that one role permits,
+never escalate to another role the user was never granted.
+
+### DAG design: sensor-gated, lag-aware, skip-propagating
+
+- **3-month lag** (`LAG_MONTHS`, one constant): TLC's actual publication cadence
+  lags real-world trip dates by roughly 2-3 months. The DAG's logical date, minus
+  the lag, determines which year/month to process — computed once, in one function,
+  shared by both the availability sensor and the ingestion task's templated
+  arguments (the same single-source-of-truth discipline as `_partition_prefix`
+  and `is_valid_trip` earlier in the project, now applied to Jinja templating).
+- **`wait_for_source_file`** (`PythonSensor`, `mode="reschedule"`): rather than
+  assuming the lag always guarantees availability, the DAG actively checks TLC's
+  source URL (via `HEAD`, not a full download) once daily, releasing its worker
+  slot between checks (`reschedule` mode) rather than blocking a worker for
+  potentially days. Times out after 14 days if a month never appears — an actual
+  human-attention signal, not silent infinite waiting.
+- **Skip propagation via exit codes**: the ingestion script now returns a bool
+  from `run()` and translates it into a distinct process exit code — `0` (new data
+  ingested), `99` (already ingested — mapped via `BashOperator`'s
+  `skip_on_exit_code=99` to Airflow's `skipped` state, which cascades to
+  downstream tasks automatically under the default trigger rule, so an
+  already-ingested month correctly skips `copy_into_raw` and `dbt_build` instead
+  of wastefully rebuilding marts for zero new rows), `1` (genuine failure), and
+  `75` (source unexpectedly unavailable — `EX_TEMPFAIL` by Unix convention; a
+  defensive backstop behind the sensor, not the primary mechanism).
+
+### Bugs found and fixed during this milestone
+
+- **`relativedelta(month=lag_months)` vs `relativedelta(months=lag_months)`** —
+  singular `month=` sets an absolute value (silently forcing every computed date
+  to that literal month number, e.g. always "March" for `lag_months=3`); plural
+  `months=` subtracts a relative offset. Both are valid, neither errors, and they
+  produce silently different results — caught by manually computing the expected
+  year/month before triggering a run and noticing the DAG's actual output didn't
+  match.
+- **`SOURCE_BASE_URL` duplicated** in the DAG file as a second literal string,
+  independent of `ingestion/config.py`'s existing constant. Fixed by importing
+  `config.py` directly at DAG-parse time (`sys.path.insert` against the
+  container's mounted `ingestion/` path), so the sensor and the ingestion script
+  share exactly one definition of the source URL.
 
 ## 9. Current Status
 

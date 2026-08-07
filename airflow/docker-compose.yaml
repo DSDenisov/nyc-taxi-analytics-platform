@@ -23,6 +23,13 @@ x-airflow-common:
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
     # project specific var
     DBT_PRIVATE_KEY_PATH: /home/airflow/dbt_svc_key.p8
+    LOADER_PRIVATE_KEY_PATH: /home/airflow/loader_svc_key.p8
+    
+    SNOWFLAKE_USER: NYC_TAXI_LOADER_SVC_USER
+    SNOWFLAKE_ROLE: NYC_TAXI_LOADER_ROLE
+    SNOWFLAKE_WAREHOUSE: NYC_TAXI_WH
+    SNOWFLAKE_DATABASE: NYC_TAXI_ANALYTICS
+    SNOWFLAKE_ACCOUNT: XDGKCAY-SXB55521
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
@@ -38,6 +45,7 @@ x-airflow-common:
     #dbt
     - ${DBT_PROFILES_HOST_PATH}/profiles.yml:/home/airflow/.dbt/profiles.yml:ro
     - ${DBT_KEY_HOST_PATH}:/home/airflow/dbt_svc_key.p8:ro
+    - ${LOADER_KEY_HOST_PATH}:/home/airflow/loader_svc_key.p8:ro
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on

@@ -12,6 +12,7 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+ALREADY_INGESTED_EXIT_CODE = 99
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -27,7 +28,7 @@ def run(year: int, month: int) -> None:
 
     if month_already_ingested(s3_client, RAW_BUCKET, year, month):
         logger.info("Month %s-%02d already ingested, skipping.", year, month)
-        return
+        return False
 
     source_url = f"{SOURCE_BASE_URL}/yellow_tripdata_{year}-{month:02d}.parquet"
     logger.info("Downloading from %s", source_url)
@@ -42,7 +43,9 @@ def run(year: int, month: int) -> None:
 if __name__ == "__main__":
     args = parse_args()
     try:
-        run(args.year, args.month)
+        was_ingested = run(args.year, args.month)
+        if not was_ingested:
+            sys.exit(ALREADY_INGESTED_EXIT_CODE)
     except Exception:
         logger.exception("Ingestion failed for %s-%02d", args.year, args.month)
         sys.exit(1)
