@@ -39,6 +39,8 @@ def run(year: int, month: int) -> None:
     final_key = upload_month_file(s3_client, RAW_BUCKET, response.raw, year, month)
     logger.info("Ingestion complete: s3://%s/%s", RAW_BUCKET, final_key)
 
+    return True
+
 
 if __name__ == "__main__":
     args = parse_args()
