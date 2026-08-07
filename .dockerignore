@@ -1,0 +1,11 @@
+# .dockerignore (project root)
+.git/
+.venv/
+.nyc-taxi-venv/
+**/__pycache__/
+*.tfstate
+*.tfstate.backup
+.terraform/
+dbt/nyc_taxi_analytics/target/
+dbt/nyc_taxi_analytics/dbt_packages/
+dbt/nyc_taxi_analytics/logs/
